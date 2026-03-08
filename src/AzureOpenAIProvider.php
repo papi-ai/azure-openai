@@ -29,14 +29,30 @@ use PapiAI\Core\ToolCall;
 use RuntimeException;
 
 /**
- * Azure OpenAI API Provider.
+ * Azure OpenAI API provider for PapiAI.
  *
- * Supports Azure-hosted OpenAI models with API key or AAD token authentication.
+ * Bridges PapiAI's core types (Message, Response, ToolCall) with Azure's OpenAI Service API,
+ * handling format conversion in both directions. Uses the same API format as OpenAI but with
+ * Azure-specific deployment-based endpoint structure. Supports chat completions, streaming,
+ * tool calling, vision (multimodal), structured JSON output, and text embeddings.
  *
- * API URL pattern: {endpoint}/openai/deployments/{deployment}/chat/completions?api-version={apiVersion}
+ * Authentication is via api-key header. All HTTP is done with ext-curl directly,
+ * with no HTTP abstraction layer.
+ *
+ * URL pattern: {endpoint}/openai/deployments/{deployment}/{operation}?api-version={version}
+ *
+ * @see https://learn.microsoft.com/en-us/azure/ai-services/openai/reference
  */
 class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterface
 {
+    /**
+     * Create a new Azure OpenAI provider instance.
+     *
+     * @param string $apiKey     Azure OpenAI API key for authentication
+     * @param string $endpoint   Azure resource endpoint URL (e.g. https://myresource.openai.azure.com)
+     * @param string $deployment Model deployment name configured in Azure portal
+     * @param string $apiVersion Azure OpenAI API version to use
+     */
     public function __construct(
         private readonly string $apiKey,
         private readonly string $endpoint,
@@ -45,6 +61,30 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
     ) {
     }
 
+    /**
+     * Send a chat completion request to the Azure OpenAI API.
+     *
+     * Converts PapiAI Messages to OpenAI's chat format, sends the request to the
+     * configured deployment, and parses the response back into a core Response object.
+     * Supports tools, vision, structured output, and custom generation parameters.
+     *
+     * @param array<Message> $messages Conversation history as PapiAI Message objects
+     * @param array{
+     *     model?: string,
+     *     tools?: array,
+     *     maxTokens?: int,
+     *     temperature?: float,
+     *     stopSequences?: array<string>,
+     *     outputSchema?: array,
+     * } $options Request options (model, tools, maxTokens, temperature, etc.)
+     *
+     * @return Response Parsed response containing text, tool calls, usage, and stop reason
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
+     */
     public function chat(array $messages, array $options = []): Response
     {
         $payload = $this->buildPayload($messages, $options);
@@ -53,6 +93,26 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         return Response::fromOpenAI($response, $messages);
     }
 
+    /**
+     * Stream a chat completion from the Azure OpenAI API using server-sent events.
+     *
+     * Yields StreamChunk objects as partial responses arrive. The final chunk
+     * has isComplete=true. Only text content is streamed.
+     *
+     * @param array<Message> $messages Conversation history as PapiAI Message objects
+     * @param array{
+     *     model?: string,
+     *     tools?: array,
+     *     maxTokens?: int,
+     *     temperature?: float,
+     *     stopSequences?: array<string>,
+     *     outputSchema?: array,
+     * } $options Request options (model, tools, maxTokens, temperature, etc.)
+     *
+     * @return iterable<StreamChunk> Stream of text chunks, ending with a completion marker
+     *
+     * @throws RuntimeException When the cURL request fails
+     */
     public function stream(array $messages, array $options = []): iterable
     {
         $payload = $this->buildPayload($messages, $options);
@@ -69,21 +129,52 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         }
     }
 
+    /**
+     * Whether this provider supports function/tool calling.
+     *
+     * Azure OpenAI supports tool calling via function definitions in the OpenAI format.
+     */
     public function supportsTool(): bool
     {
         return true;
     }
 
+    /**
+     * Whether this provider supports vision (multimodal image input).
+     *
+     * Azure OpenAI supports image URLs and base64-encoded images in message content.
+     */
     public function supportsVision(): bool
     {
         return true;
     }
 
+    /**
+     * Whether this provider supports structured JSON output via response_format.
+     *
+     * Azure OpenAI supports json_schema response format for structured output.
+     */
     public function supportsStructuredOutput(): bool
     {
         return true;
     }
 
+    /**
+     * Generate text embeddings via the Azure OpenAI Embeddings API.
+     *
+     * @param string|array<string> $input  Text or array of texts to embed
+     * @param array{
+     *     model?: string,
+     *     dimensions?: int,
+     * } $options Embedding options (model defaults to the configured deployment)
+     *
+     * @return EmbeddingResponse Embedding vectors, model name, and usage statistics
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
+     */
     public function embed(string|array $input, array $options = []): EmbeddingResponse
     {
         $model = $options['model'] ?? $this->deployment;
@@ -110,6 +201,11 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         );
     }
 
+    /**
+     * Get the unique identifier for this provider.
+     *
+     * @return string Provider name used for error reporting and identification
+     */
     public function getName(): string
     {
         return 'azure-openai';
@@ -357,7 +453,19 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
     }
 
     /**
-     * Make a chat completions API request.
+     * Make a chat completions API request via cURL.
+     *
+     * Sends a POST request to the Azure OpenAI chat completions endpoint
+     * and returns the decoded JSON response.
+     *
+     * @param array<string, mixed> $payload JSON-serializable request body
+     *
+     * @return array<string, mixed> Decoded API response
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
      *
      * @codeCoverageIgnore
      */
@@ -399,7 +507,19 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
     }
 
     /**
-     * Make an embeddings API request.
+     * Make an embeddings API request via cURL.
+     *
+     * Sends a POST request to the Azure OpenAI embeddings endpoint
+     * and returns the decoded JSON response.
+     *
+     * @param array<string, mixed> $payload JSON-serializable request body
+     *
+     * @return array<string, mixed> Decoded API response
+     *
+     * @throws AuthenticationException When the API key is invalid (HTTP 401)
+     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
+     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
+     * @throws RuntimeException        When the cURL request itself fails
      *
      * @codeCoverageIgnore
      */
@@ -441,11 +561,16 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
     }
 
     /**
-     * Make a streaming API request.
+     * Make a streaming chat completions request via cURL.
+     *
+     * Buffers the full SSE response, then parses and yields each event as a
+     * decoded JSON array. Stops when the [DONE] sentinel is received.
+     *
+     * @param array<string, mixed> $payload JSON-serializable request body (stream flag should be set)
+     *
+     * @return Generator<int, array<string, mixed>> Decoded SSE events from the API
      *
      * @codeCoverageIgnore
-     *
-     * @return Generator<array>
      */
     protected function streamRequest(array $payload): Generator
     {
