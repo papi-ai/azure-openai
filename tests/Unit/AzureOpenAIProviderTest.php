@@ -404,7 +404,7 @@ describe('AzureOpenAIProvider', function () {
 
             $response = $this->provider->embed('Hello world');
 
-            expect($response->usage)->toBe(['prompt_tokens' => 8, 'total_tokens' => 8]);
+            expect($response->usage->toArray())->toBe(['prompt_tokens' => 8, 'total_tokens' => 8]);
             expect($response->getPromptTokens())->toBe(8);
             expect($response->getTotalTokens())->toBe(8);
         });
