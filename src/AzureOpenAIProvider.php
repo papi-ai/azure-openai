@@ -16,6 +16,7 @@ namespace PapiAI\AzureOpenAI;
 
 use Generator;
 use PapiAI\Core\Contracts\EmbeddingProviderInterface;
+use PapiAI\Core\Contracts\NamedToolSelectableInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
 use PapiAI\Core\Effort;
 use PapiAI\Core\EmbeddingResponse;
@@ -48,7 +49,7 @@ use RuntimeException;
  *
  * @psalm-import-type ChatOptions from ProviderInterface
  */
-class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterface
+class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterface, NamedToolSelectableInterface
 {
     /**
      * The effort levels safe to send to any Azure deployment.

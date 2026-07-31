@@ -13,6 +13,8 @@
 declare(strict_types=1);
 
 use PapiAI\AzureOpenAI\AzureOpenAIProvider;
+use PapiAI\Core\Contracts\NamedToolSelectableInterface;
+use PapiAI\Core\Contracts\ToolSelectableInterface;
 use PapiAI\Core\Message;
 
 /**
@@ -69,5 +71,12 @@ describe('AzureOpenAIProvider tool choice', function () {
         expect(fn () => $this->provider->chat([Message::user('hi')], ['toolChoice' => 'required']))
             ->toThrow(InvalidArgumentException::class);
         expect($this->provider->lastPayload)->toBe([]);
+    });
+});
+
+describe('AzureOpenAIProvider tool-selection capability', function () {
+    it('declares what it can force, so callers can ask instead of catching', function () {
+        expect(is_subclass_of(AzureOpenAIProvider::class, NamedToolSelectableInterface::class))->toBeTrue();
+        expect(is_subclass_of(AzureOpenAIProvider::class, ToolSelectableInterface::class))->toBeTrue();
     });
 });
