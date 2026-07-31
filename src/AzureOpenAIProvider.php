@@ -16,11 +16,14 @@ namespace PapiAI\AzureOpenAI;
 
 use Generator;
 use PapiAI\Core\Contracts\EmbeddingProviderInterface;
+use PapiAI\Core\Contracts\NamedToolSelectableInterface;
 use PapiAI\Core\Contracts\ProviderInterface;
+use PapiAI\Core\Effort;
 use PapiAI\Core\EmbeddingResponse;
 use PapiAI\Core\Exception\AuthenticationException;
 use PapiAI\Core\Exception\ProviderException;
 use PapiAI\Core\Exception\RateLimitException;
+use PapiAI\Core\Exception\UnknownEffortException;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
 use PapiAI\Core\Role;
@@ -46,8 +49,21 @@ use RuntimeException;
  *
  * @psalm-import-type ChatOptions from ProviderInterface
  */
-class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterface
+class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterface, NamedToolSelectableInterface
 {
+    /**
+     * The effort levels safe to send to any Azure deployment.
+     *
+     * Deliberately narrower than the OpenAI provider's. There the model name is in the request, so
+     * the accepted levels can be worked out from it; here the request carries a **deployment
+     * name**, which the customer chooses freely and which reveals nothing about the model behind
+     * it. Since OpenAI rejects an unknown level outright rather than ignoring it, guessing would
+     * turn a hint into a 400. These three are accepted by every reasoning model.
+     *
+     * @var non-empty-list<Effort>
+     */
+    private const OFFERED_EFFORT = [Effort::Low, Effort::Medium, Effort::High];
+
     /**
      * Create a new Azure OpenAI provider instance.
      *
@@ -61,6 +77,7 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         private readonly string $endpoint,
         private readonly string $deployment,
         private readonly string $apiVersion = '2024-06-01',
+        private readonly ?Effort $defaultEffort = null,
     ) {
     }
 
@@ -284,7 +301,33 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
             }
         }
 
+        // Reasoning effort. Azure serves the same reasoning models as OpenAI and takes the same
+        // parameter, narrowed to the levels every deployment accepts.
+        $effort = $this->effortFor($options);
+
+        if ($effort !== null) {
+            $payload['reasoning_effort'] = $effort->nearestOf(self::OFFERED_EFFORT)->value;
+        }
+
         return $payload;
+    }
+
+    /**
+     * The effort this request asks for: the per-call option, else the provider default.
+     *
+     * @param array<string, mixed> $options The caller's request options
+     *
+     * @throws UnknownEffortException When the level is not one core defines
+     */
+    private function effortFor(array $options): ?Effort
+    {
+        if (!isset($options['effort'])) {
+            return $this->defaultEffort;
+        }
+
+        $level = (string) $options['effort'];
+
+        return Effort::tryFrom($level) ?? throw new UnknownEffortException($level);
     }
 
     /**
