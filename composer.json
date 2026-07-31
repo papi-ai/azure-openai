@@ -11,7 +11,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "papi-ai/papi-core": "^0.14",
+        "papi-ai/papi-core": "^0.15",
         "ext-curl": "*"
     },
     "require-dev": {
