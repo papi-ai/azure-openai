@@ -172,7 +172,7 @@ describe('AzureOpenAIProvider', function () {
             ]);
 
             expect($this->provider->lastPayload['model'])->toBe('gpt-4-turbo');
-            expect($this->provider->lastPayload['max_tokens'])->toBe(8192);
+            expect($this->provider->lastPayload['max_completion_tokens'])->toBe(8192);
             expect($this->provider->lastPayload['temperature'])->toBe(0.5);
             expect($this->provider->lastPayload['stop'])->toBe(['END']);
         });
