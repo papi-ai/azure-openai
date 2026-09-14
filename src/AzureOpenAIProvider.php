@@ -259,7 +259,9 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         }
 
         if (isset($options['maxTokens'])) {
-            $payload['max_tokens'] = $options['maxTokens'];
+            // max_tokens is deprecated and rejected by every reasoning model; max_completion_tokens
+            // is accepted by all of them, so there is nothing to decide per deployment.
+            $payload['max_completion_tokens'] = $options['maxTokens'];
         }
 
         if (isset($options['temperature'])) {
@@ -541,8 +543,6 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $error = curl_error($ch);
 
-        curl_close($ch);
-
         if ($error !== '') {
             throw new RuntimeException("Azure OpenAI API request failed: {$error}");
         }
@@ -595,8 +595,6 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
         $error = curl_error($ch);
 
-        curl_close($ch);
-
         if ($error !== '') {
             throw new RuntimeException("Azure OpenAI Embeddings API request failed: {$error}");
         }
@@ -640,7 +638,6 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         ]);
 
         curl_exec($ch);
-        curl_close($ch);
 
         // Parse SSE events
         $lines = explode("\n", $buffer);
