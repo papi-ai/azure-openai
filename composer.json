@@ -1,7 +1,7 @@
 {
     "name": "papi-ai/azure-openai",
     "description": "Azure OpenAI provider for PapiAI",
-    "type": "library",
+    "type": "papi-provider",
     "license": "MIT",
     "authors": [
         {
@@ -11,7 +11,7 @@
     ],
     "require": {
         "php": "^8.2",
-        "papi-ai/papi-core": "^0.15.3",
+        "papi-ai/papi-core": "^0.15.4",
         "ext-curl": "*"
     },
     "require-dev": {
@@ -46,5 +46,10 @@
             "pestphp/pest-plugin": true
         }
     },
-    "minimum-stability": "stable"
+    "minimum-stability": "stable",
+    "extra": {
+        "papi": {
+            "factory": "PapiAI\\AzureOpenAI\\AzureOpenAIProviderFactory"
+        }
+    }
 }

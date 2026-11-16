@@ -55,6 +55,28 @@ Chat, streaming and tool calling go through the Responses API on Azure's v1 surf
 | Structured output | Yes |
 | Embeddings | Yes |
 
+## Creating It by Name
+
+An application that picks its provider from configuration can build this one without naming
+its class:
+
+```php
+use PapiAI\Core\Factory\ComposerDiscovery;
+use PapiAI\Core\Factory\ProviderRegistry;
+
+$registry = new ProviderRegistry(new ComposerDiscovery());
+
+$provider = $registry->create('azure-openai', [
+    'api_key' => $_ENV['AZURE_OPENAI_API_KEY'],
+    'endpoint' => $_ENV['AZURE_OPENAI_ENDPOINT'],
+    'deployment' => $_ENV['AZURE_OPENAI_DEPLOYMENT'],
+]);
+```
+
+It takes `api_key` (required), `endpoint` (required), `deployment` (required), `api_version` and
+`effort`. Anything it is not given falls back to the constructor's defaults, and a missing or
+unknown setting throws `ConfigurationException` before any request is made.
+
 ## Requirements
 
 - PHP 8.2+
