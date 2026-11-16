@@ -43,7 +43,8 @@ use RuntimeException;
  * Authentication is via api-key header. All HTTP is done with ext-curl directly,
  * with no HTTP abstraction layer.
  *
- * URL pattern: {endpoint}/openai/deployments/{deployment}/{operation}?api-version={version}
+ * Chat uses the v1 surface, {endpoint}/openai/v1/responses, with the deployment named in the body.
+ * Embeddings use {endpoint}/openai/deployments/{deployment}/embeddings?api-version={version}.
  *
  * @see https://learn.microsoft.com/en-us/azure/ai-services/openai/reference
  *
@@ -82,42 +83,25 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
     }
 
     /**
-     * Send a chat completion request to the Azure OpenAI API.
+     * Send a conversation to the Responses API and return the model's turn.
      *
-     * Converts PapiAI Messages to OpenAI's chat format, sends the request to the
-     * configured deployment, and parses the response back into a core Response object.
-     * Supports tools, vision, structured output, and custom generation parameters.
-     *
-     * @param array<Message> $messages Conversation history as PapiAI Message objects
-     * @param ChatOptions    $options  Request options (model, tools, maxTokens, temperature, toolChoice, etc.)
-     *
-     * @return Response Parsed response containing text, tool calls, usage, and stop reason
-     *
-     * @throws AuthenticationException When the API key is invalid (HTTP 401)
-     * @throws RateLimitException      When rate limits are exceeded (HTTP 429)
-     * @throws ProviderException       When the API returns any other error (HTTP 4xx/5xx)
-     * @throws RuntimeException        When the cURL request itself fails
+     * @param Message[] $messages Conversation history
+     * @param array     $options  Provider options (model, maxTokens, temperature, tools, toolChoice, effort, outputSchema)
      */
     public function chat(array $messages, array $options = []): Response
     {
-        $payload = $this->buildPayload($messages, $options);
-        $response = $this->request($payload);
+        $response = $this->request($this->buildPayload($messages, $options));
 
-        return Response::fromOpenAI($response, $messages);
+        return $this->parseResponse($response, $messages);
     }
 
     /**
-     * Stream a chat completion from the Azure OpenAI API using server-sent events.
+     * Stream a response, yielding text deltas and a final completion marker.
      *
-     * Yields StreamChunk objects as partial responses arrive. The final chunk
-     * has isComplete=true. Only text content is streamed.
+     * @param Message[] $messages Conversation history
+     * @param array     $options  Provider options
      *
-     * @param array<Message> $messages Conversation history as PapiAI Message objects
-     * @param array $options Request options (model, tools, maxTokens, temperature, etc.)
-     *
-     * @return iterable<StreamChunk> Stream of text chunks, ending with a completion marker
-     *
-     * @throws RuntimeException When the cURL request fails
+     * @return iterable<StreamChunk>
      */
     public function stream(array $messages, array $options = []): iterable
     {
@@ -125,11 +109,13 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
         $payload['stream'] = true;
 
         foreach ($this->streamRequest($payload) as $event) {
-            $delta = $event['choices'][0]['delta'] ?? [];
-            if (isset($delta['content'])) {
-                yield new StreamChunk($delta['content']);
+            $type = $event['type'] ?? '';
+
+            if ($type === 'response.output_text.delta') {
+                yield new StreamChunk((string) ($event['delta'] ?? ''));
             }
-            if (($event['choices'][0]['finish_reason'] ?? null) !== null) {
+
+            if (in_array($type, ['response.completed', 'response.incomplete', 'response.failed'], true)) {
                 yield new StreamChunk('', isComplete: true);
             }
         }
@@ -218,13 +204,12 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
     }
 
     /**
-     * Build the chat completions API URL.
+     * The Responses endpoint on Azure's v1 surface. The deployment is named in the body, not the
+     * path, and the v1 surface takes no api-version.
      */
-    private function buildChatUrl(): string
+    protected function buildChatUrl(): string
     {
-        $base = rtrim($this->endpoint, '/');
-
-        return "{$base}/openai/deployments/{$this->deployment}/chat/completions?api-version={$this->apiVersion}";
+        return rtrim($this->endpoint, '/') . '/openai/v1/responses';
     }
 
     /**
@@ -238,80 +223,195 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
     }
 
     /**
-     * Build the API request payload.
+     * Build the Responses API request body. `model` is the deployment name on Azure's v1 surface.
+     * The history is sent in full each time (`store: false`).
      */
     private function buildPayload(array $messages, array $options): array
     {
-        $apiMessages = [];
+        [$instructions, $input] = $this->splitConversation($messages);
+
+        $payload = ['model' => $options['model'] ?? $this->deployment, 'input' => $input, 'store' => false];
+
+        if ($instructions !== null) {
+            $payload['instructions'] = $instructions;
+        }
+
+        return $payload + $this->generationSettings($options);
+    }
+
+    /**
+     * The system message, which Responses takes as `instructions`, and everything else as items.
+     *
+     * @param Message[] $messages
+     *
+     * @return array{0: string|null, 1: list<array<string, mixed>>}
+     */
+    private function splitConversation(array $messages): array
+    {
+        $instructions = null;
+        $input = [];
 
         foreach ($messages as $message) {
-            if ($message instanceof Message) {
-                $apiMessages[] = $this->convertMessage($message);
+            if (!$message instanceof Message) {
+                continue;
+            }
+
+            if ($message->isSystem()) {
+                $instructions = $message->getText();
+
+                continue;
+            }
+
+            foreach ($this->toInputItems($message) as $item) {
+                $input[] = $item;
             }
         }
 
-        $payload = [
-            'messages' => $apiMessages,
-        ];
+        return [$instructions, $input];
+    }
 
-        if (isset($options['model'])) {
-            $payload['model'] = $options['model'];
-        }
+    /**
+     * The optional request fields: output ceiling, sampling, schema, tools, forced choice, effort.
+     *
+     * @return array<string, mixed>
+     */
+    private function generationSettings(array $options): array
+    {
+        $settings = [];
 
         if (isset($options['maxTokens'])) {
-            // max_tokens is deprecated and rejected by every reasoning model; max_completion_tokens
-            // is accepted by all of them, so there is nothing to decide per deployment.
-            $payload['max_completion_tokens'] = $options['maxTokens'];
+            $settings['max_output_tokens'] = $options['maxTokens'];
         }
 
         if (isset($options['temperature'])) {
-            $payload['temperature'] = $options['temperature'];
+            $settings['temperature'] = $options['temperature'];
         }
 
-        if (isset($options['stopSequences'])) {
-            $payload['stop'] = $options['stopSequences'];
-        }
-
-        // Handle structured output / JSON mode
         if (isset($options['outputSchema'])) {
-            $payload['response_format'] = [
-                'type' => 'json_schema',
-                'json_schema' => [
-                    'name' => 'response',
-                    'schema' => $options['outputSchema'],
-                ],
-            ];
+            $settings['text'] = ['format' => ['type' => 'json_schema', 'name' => 'response', 'schema' => $options['outputSchema']]];
         }
 
-        // Handle tools
-        if (isset($options['tools']) && !empty($options['tools'])) {
-            $payload['tools'] = $this->convertTools($options['tools']);
+        if (!empty($options['tools'])) {
+            $settings['tools'] = $this->convertTools($options['tools']);
         }
 
-        // Forced tool choice (OpenAI-compatible). Validation lives in core and throws before any HTTP call.
+        // Validation lives in core and throws before any HTTP call, tools or no tools.
         if (isset($options['toolChoice'])) {
             $choice = ToolChoice::fromOption($options['toolChoice'], $options['tools'] ?? []);
 
             if (!empty($options['tools'])) {
-                $payload['tool_choice'] = $choice->toolName !== null
-                    ? ['type' => 'function', 'function' => ['name' => $choice->toolName]]
-                    : match ($choice->mode) {
-                        ToolChoice::NONE => 'none',
-                        ToolChoice::REQUIRED => 'required',
-                        default => 'auto',
-                    };
+                $settings['tool_choice'] = $this->toolChoiceFor($choice);
             }
         }
 
-        // Reasoning effort. Azure serves the same reasoning models as OpenAI and takes the same
-        // parameter, narrowed to the levels every deployment accepts.
         $effort = $this->effortFor($options);
 
         if ($effort !== null) {
-            $payload['reasoning_effort'] = $effort->nearestOf(self::OFFERED_EFFORT)->value;
+            $settings['reasoning'] = ['effort' => $effort->nearestOf(self::OFFERED_EFFORT)->value];
         }
 
-        return $payload;
+        return $settings;
+    }
+
+    /**
+     * Responses spells a named tool flat, and the modes as bare strings.
+     *
+     * @return array{type: string, name: string}|string
+     */
+    private function toolChoiceFor(ToolChoice $choice): array|string
+    {
+        if ($choice->toolName !== null) {
+            return ['type' => 'function', 'name' => $choice->toolName];
+        }
+
+        return match ($choice->mode) {
+            ToolChoice::NONE => 'none',
+            ToolChoice::REQUIRED => 'required',
+            default => 'auto',
+        };
+    }
+
+    /**
+     * Translate one PapiAI message into Responses input items.
+     *
+     * @return list<array<string, mixed>>
+     */
+    private function toInputItems(Message $message): array
+    {
+        if ($message->isTool()) {
+            return [[
+                'type' => 'function_call_output',
+                'call_id' => $message->toolCallId,
+                'output' => is_string($message->content) ? $message->content : json_encode($message->content),
+            ]];
+        }
+
+        if ($message->hasToolCalls()) {
+            $items = [];
+
+            if ($message->getText() !== '') {
+                $items[] = ['role' => 'assistant', 'content' => [['type' => 'output_text', 'text' => $message->getText()]]];
+            }
+
+            foreach ($message->toolCalls as $toolCall) {
+                $items[] = ['type' => 'function_call', 'call_id' => $toolCall->id, 'name' => $toolCall->name, 'arguments' => json_encode($toolCall->arguments)];
+            }
+
+            return $items;
+        }
+
+        if (is_array($message->content)) {
+            return [['role' => $this->convertRole($message->role), 'content' => $this->convertMultimodalContent($message->content)]];
+        }
+
+        if ($message->role === Role::Assistant) {
+            return [['role' => 'assistant', 'content' => [['type' => 'output_text', 'text' => $message->content]]]];
+        }
+
+        return [['role' => $this->convertRole($message->role), 'content' => $message->content]];
+    }
+
+    /**
+     * Read the model's turn out of a Responses body: text from message items, calls from
+     * function_call items; reasoning items are skipped.
+     *
+     * @param array<string, mixed> $response
+     * @param Message[]            $messages
+     */
+    private function parseResponse(array $response, array $messages): Response
+    {
+        $text = '';
+        $toolCalls = [];
+
+        foreach ($response['output'] ?? [] as $item) {
+            $type = $item['type'] ?? '';
+
+            if ($type === 'message') {
+                foreach ($item['content'] ?? [] as $part) {
+                    if (($part['type'] ?? '') === 'output_text') {
+                        $text .= $part['text'] ?? '';
+                    }
+                }
+            }
+
+            if ($type === 'function_call') {
+                $toolCalls[] = new ToolCall(
+                    id: (string) ($item['call_id'] ?? $item['id'] ?? ''),
+                    name: (string) ($item['name'] ?? ''),
+                    arguments: json_decode((string) ($item['arguments'] ?? '{}'), true) ?? [],
+                );
+            }
+        }
+
+        $incomplete = ($response['status'] ?? 'completed') === 'incomplete';
+
+        return new Response(
+            text: $text,
+            toolCalls: $toolCalls,
+            messages: $messages,
+            usage: $response['usage'] ?? [],
+            stopReason: $incomplete ? (string) ($response['incomplete_details']['reason'] ?? 'incomplete') : ($toolCalls !== [] ? 'tool_calls' : 'stop'),
+        );
     }
 
     /**
@@ -333,41 +433,11 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
     }
 
     /**
-     * Convert a Message to OpenAI-compatible API format.
-     */
-    private function convertMessage(Message $message): array
-    {
-        $apiMessage = [
-            'role' => $this->convertRole($message->role),
-        ];
-
-        if ($message->isTool()) {
-            $apiMessage['role'] = 'tool';
-            $apiMessage['content'] = $message->content;
-            $apiMessage['tool_call_id'] = $message->toolCallId;
-        } elseif ($message->hasToolCalls()) {
-            $apiMessage['content'] = $message->getText() ?: null;
-            $apiMessage['tool_calls'] = array_map(function (ToolCall $tc) {
-                return [
-                    'id' => $tc->id,
-                    'type' => 'function',
-                    'function' => [
-                        'name' => $tc->name,
-                        'arguments' => json_encode($tc->arguments),
-                    ],
-                ];
-            }, $message->toolCalls);
-        } elseif (is_array($message->content)) {
-            $apiMessage['content'] = $this->convertMultimodalContent($message->content);
-        } else {
-            $apiMessage['content'] = $message->content;
-        }
-
-        return $apiMessage;
-    }
-
-    /**
-     * Convert multimodal content to OpenAI-compatible format.
+     * Convert multimodal parts to Responses input parts. A base64 image travels as a data URL.
+     *
+     * @param array<array{type: string, text?: string, source?: array}> $content
+     *
+     * @return list<array<string, string>>
      */
     private function convertMultimodalContent(array $content): array
     {
@@ -375,49 +445,48 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
 
         foreach ($content as $part) {
             if ($part['type'] === 'text') {
-                $parts[] = ['type' => 'text', 'text' => $part['text']];
-            } elseif ($part['type'] === 'image') {
-                $source = $part['source'];
-                if ($source['type'] === 'url') {
-                    $parts[] = [
-                        'type' => 'image_url',
-                        'image_url' => ['url' => $source['url']],
-                    ];
-                } else {
-                    $parts[] = [
-                        'type' => 'image_url',
-                        'image_url' => [
-                            'url' => "data:{$source['media_type']};base64,{$source['data']}",
-                        ],
-                    ];
-                }
+                $parts[] = ['type' => 'input_text', 'text' => $part['text']];
+
+                continue;
             }
+
+            if ($part['type'] !== 'image') {
+                continue;
+            }
+
+            $source = $part['source'];
+            $parts[] = [
+                'type' => 'input_image',
+                'image_url' => $source['type'] === 'url' ? $source['url'] : sprintf('data:%s;base64,%s', $source['media_type'], $source['data']),
+            ];
         }
 
         return $parts;
     }
 
     /**
-     * Convert tools from PapiAI format to OpenAI-compatible format.
+     * Convert PapiAI tool definitions to the flat Responses tool shape.
+     *
+     * @param array<array{name: string, description: string, input_schema?: array, parameters?: array}> $tools
+     *
+     * @return list<array{type: string, name: string, description: string, parameters: array}>
      */
     private function convertTools(array $tools): array
     {
-        $openaiTools = [];
+        $declared = [];
 
         foreach ($tools as $tool) {
             if (is_array($tool)) {
-                $openaiTools[] = [
+                $declared[] = [
                     'type' => 'function',
-                    'function' => [
-                        'name' => $tool['name'],
-                        'description' => $tool['description'],
-                        'parameters' => $tool['input_schema'] ?? $tool['parameters'] ?? ['type' => 'object', 'properties' => []],
-                    ],
+                    'name' => $tool['name'],
+                    'description' => $tool['description'],
+                    'parameters' => $tool['input_schema'] ?? $tool['parameters'] ?? ['type' => 'object', 'properties' => []],
                 ];
             }
         }
 
-        return $openaiTools;
+        return $declared;
     }
 
     /**

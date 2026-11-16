@@ -40,6 +40,10 @@ $response = $provider->embed('Hello world', [
 $vector = $response->first();
 ```
 
+## Endpoint
+
+Chat, streaming and tool calling go through the Responses API on Azure's v1 surface (`{endpoint}/openai/v1/responses`), with the deployment named as `model` in the body and no `api-version`. Embeddings stay on the deployment URL. Each request carries the full conversation (`store: false`).
+
 ## Capabilities
 
 | Capability | Supported |
