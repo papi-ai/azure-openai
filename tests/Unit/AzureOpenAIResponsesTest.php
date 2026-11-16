@@ -143,3 +143,20 @@ describe('AzureOpenAIProvider stop reason', function () {
         expect(($this->stoppedBecause)(['output' => [['type' => 'function_call', 'call_id' => 'c1', 'name' => 'f', 'arguments' => '{}']]]))->toBe(StopReason::ToolCalls);
     });
 });
+
+describe('AzureOpenAIProvider tool calls without arguments', function () {
+    it('re-sends them as an empty object, which the API requires', function () {
+        $provider = new TestableAzureResponsesProvider('key', 'https://myres.openai.azure.com', 'my-deployment');
+        $provider->fakeResponse = ['output' => [['type' => 'message', 'role' => 'assistant', 'content' => [['type' => 'output_text', 'text' => 'done']]]], 'usage' => []];
+
+        $provider->chat([
+            Message::user('Run the specs'),
+            Message::assistant('', [new ToolCall('c1', 'run_specs', [])]),
+            Message::toolResult('c1', 'ok'),
+        ]);
+
+        $wire = (string) json_encode($provider->lastPayload);
+        expect($wire)->toContain('"arguments":"{}"');
+        expect($wire)->not->toContain('"arguments":"[]"');
+    });
+});

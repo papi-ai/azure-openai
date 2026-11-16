@@ -355,7 +355,7 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
             }
 
             foreach ($message->toolCalls as $toolCall) {
-                $items[] = ['type' => 'function_call', 'call_id' => $toolCall->id, 'name' => $toolCall->name, 'arguments' => json_encode($toolCall->arguments)];
+                $items[] = ['type' => 'function_call', 'call_id' => $toolCall->id, 'name' => $toolCall->name, 'arguments' => $toolCall->argumentsAsJson()];
             }
 
             return $items;
