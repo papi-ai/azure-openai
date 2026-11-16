@@ -14,6 +14,7 @@ declare(strict_types=1);
 
 use PapiAI\AzureOpenAI\AzureOpenAIProvider;
 use PapiAI\Core\Message;
+use PapiAI\Core\StopReason;
 use PapiAI\Core\StreamChunk;
 use PapiAI\Core\ToolCall;
 
@@ -118,5 +119,27 @@ describe('AzureOpenAIProvider on the Responses API', function () {
         expect($this->provider->lastPayload['stream'])->toBeTrue();
         expect(array_map(fn (StreamChunk $c) => $c->text, $chunks))->toBe(['Hi', '']);
         expect(end($chunks)->isComplete)->toBeTrue();
+    });
+});
+
+describe('AzureOpenAIProvider stop reason', function () {
+    beforeEach(function () {
+        $this->provider = new TestableAzureResponsesProvider('key', 'https://myres.openai.azure.com', 'my-deployment');
+        $this->stoppedBecause = function (array $response): StopReason {
+            $this->provider->fakeResponse = $response + [
+                'output' => [['type' => 'message', 'role' => 'assistant', 'content' => [['type' => 'output_text', 'text' => 'x']]]],
+                'usage' => [],
+            ];
+
+            return $this->provider->chat([Message::user('Hi')])->stoppedBecause;
+        };
+    });
+
+    it('says why the model stopped in core\'s vocabulary', function () {
+        expect(($this->stoppedBecause)(['status' => 'completed']))->toBe(StopReason::Stop);
+        expect(($this->stoppedBecause)(['status' => 'incomplete', 'incomplete_details' => ['reason' => 'max_output_tokens']]))->toBe(StopReason::MaxTokens);
+        expect(($this->stoppedBecause)(['status' => 'incomplete', 'incomplete_details' => ['reason' => 'content_filter']]))->toBe(StopReason::Refused);
+        expect(($this->stoppedBecause)(['status' => 'failed']))->toBe(StopReason::Other);
+        expect(($this->stoppedBecause)(['output' => [['type' => 'function_call', 'call_id' => 'c1', 'name' => 'f', 'arguments' => '{}']]]))->toBe(StopReason::ToolCalls);
     });
 });

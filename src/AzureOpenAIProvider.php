@@ -27,6 +27,7 @@ use PapiAI\Core\Exception\UnknownEffortException;
 use PapiAI\Core\Message;
 use PapiAI\Core\Response;
 use PapiAI\Core\Role;
+use PapiAI\Core\StopReason;
 use PapiAI\Core\StreamChunk;
 use PapiAI\Core\ToolCall;
 use PapiAI\Core\ToolChoice;
@@ -411,6 +412,7 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
             messages: $messages,
             usage: $response['usage'] ?? [],
             stopReason: $incomplete ? (string) ($response['incomplete_details']['reason'] ?? 'incomplete') : ($toolCalls !== [] ? 'tool_calls' : 'stop'),
+            stoppedBecause: $this->stoppedBecauseOf($response, $toolCalls !== []),
         );
     }
 
@@ -723,5 +725,27 @@ class AzureOpenAIProvider implements ProviderInterface, EmbeddingProviderInterfa
                 }
             }
         }
+    }
+
+    /**
+     * Why the model stopped, in core's vocabulary.
+     *
+     * @param array<string, mixed> $response
+     */
+    private function stoppedBecauseOf(array $response, bool $calledTools): StopReason
+    {
+        if ($calledTools) {
+            return StopReason::ToolCalls;
+        }
+
+        return match ($response['status'] ?? 'completed') {
+            'completed' => StopReason::Stop,
+            'incomplete' => match ($response['incomplete_details']['reason'] ?? null) {
+                'max_output_tokens' => StopReason::MaxTokens,
+                'content_filter' => StopReason::Refused,
+                default => StopReason::Other,
+            },
+            default => StopReason::Other,
+        };
     }
 }
