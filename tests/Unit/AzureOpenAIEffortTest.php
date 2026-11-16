@@ -44,14 +44,14 @@ describe('AzureOpenAIProvider reasoning effort', function () {
         foreach (['low', 'medium', 'high'] as $level) {
             ($this->chat)(['effort' => $level]);
 
-            expect($this->provider->lastPayload['reasoning_effort'])->toBe($level);
+            expect($this->provider->lastPayload['reasoning']['effort'])->toBe($level);
         }
     });
 
     it('sends nothing when the caller does not ask', function () {
         ($this->chat)([]);
 
-        expect($this->provider->lastPayload)->not->toHaveKey('reasoning_effort');
+        expect($this->provider->lastPayload)->not->toHaveKey('reasoning');
     });
 
     it('rejects a level it does not recognise, before any HTTP call', function () {
